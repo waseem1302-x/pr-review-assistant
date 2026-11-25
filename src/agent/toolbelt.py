@@ -20,7 +20,7 @@ from .budget import Budget
 from .context import ReviewContext
 from .findings import AgentFinding, FindingCollector
 from .fixes import rejection_feedback, validate_fix
-from .rules import RuleCollector, validate_rule
+from .rules import RuleCollector, check_rule_quietness, validate_rule
 from .rules import rejection_feedback as rule_rejection_feedback
 
 logger = logging.getLogger(__name__)
@@ -655,6 +655,10 @@ class Toolbelt:
             self.rule_collector,
             workspace=self.context.workspace,
         )
+        if rule.valid:
+            rule = check_rule_quietness(
+                rule, workspace=self.context.workspace, changed_paths=self.context.changed_paths
+            )
         rule.rationale = str(args.get("rationale", "")).strip()
         self.rule_collector.add(rule)
 

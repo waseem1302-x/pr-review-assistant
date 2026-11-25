@@ -14,6 +14,7 @@ This module is the boundary that keeps "declarative" true. Everything the agent
 writes passes through `validate_rule` before semgrep ever sees it.
 """
 
+import json
 import logging
 import os
 import re
@@ -60,6 +61,7 @@ class CustomRule:
     valid: bool = False
     rejected_because: str = ""
     hits: int = 0
+    baseline_hits: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -68,6 +70,7 @@ class CustomRule:
             "valid": self.valid,
             "rejected_because": self.rejected_because,
             "hits": self.hits,
+            "baseline_hits": self.baseline_hits,
             "yaml": self.yaml_text,
         }
 
@@ -258,6 +261,113 @@ def _semgrep_validate(body: dict, workspace: str | None) -> str:
         return ""
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     return detail[-1][:200] if detail else f"exit code {proc.returncode}"
+
+
+def check_rule_quietness(
+    rule: CustomRule,
+    workspace: str,
+    changed_paths: list[str],
+    run_semgrep: bool = True,
+) -> CustomRule:
+    """Reject a rule that matches tracked files outside the pull request."""
+    if not rule.valid or not run_semgrep:
+        return rule
+
+    try:
+        body, error = _extract_rule(yaml.safe_load(rule.yaml_text))
+    except yaml.YAMLError as e:
+        rule.valid = False
+        rule.rejected_because = f"invalid YAML: {str(e).splitlines()[0]}"
+        return rule
+    if body is None:
+        rule.valid = False
+        rule.rejected_because = error
+        return rule
+
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", "-z"],
+            capture_output=True,
+            text=True,
+            timeout=SEMGREP_RULE_TIMEOUT_SECONDS,
+            cwd=workspace,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        # The toolbelt has no independent tracked-file listing; its search also
+        # depends on git. Without one, an untracked workspace walk is not a safe
+        # substitute for accepted code.
+        logger.info("Cannot list tracked files; skipping rule quietness check: %s", e)
+        return rule
+    if listing.returncode != 0:
+        logger.info("Cannot list tracked files; skipping rule quietness check")
+        return rule
+
+    workspace = os.path.abspath(workspace)
+    changed = {os.path.abspath(os.path.join(workspace, path)) for path in changed_paths}
+    files = [
+        path for path in listing.stdout.split("\0")
+        if path and os.path.abspath(os.path.join(workspace, path)) not in changed
+    ]
+    if not files:
+        return rule
+
+    config_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yaml", delete=False, encoding="utf-8"
+        ) as handle:
+            config_path = handle.name
+            yaml.safe_dump({"rules": [body]}, handle, sort_keys=False)
+
+        proc = subprocess.run(
+            ["semgrep", "--config", config_path, "--json", "--no-git-ignore", "--", *files],
+            capture_output=True,
+            text=True,
+            timeout=SEMGREP_RULE_TIMEOUT_SECONDS,
+            cwd=workspace,
+            check=False,
+        )
+    except FileNotFoundError:
+        logger.info("semgrep not installed; skipping rule quietness check")
+        return rule
+    except (OSError, subprocess.SubprocessError, yaml.YAMLError) as e:
+        logger.warning("Rule quietness check failed to run: %s", e)
+        return rule
+    finally:
+        if config_path:
+            try:
+                os.unlink(config_path)
+            except OSError:
+                pass
+
+    if proc.returncode != 0:
+        logger.warning("Rule quietness check exited %d: %s", proc.returncode, proc.stderr[:200])
+        return rule
+    try:
+        results = json.loads(proc.stdout).get("results", [])
+        hits = []
+        for result in results:
+            if result.get("check_id", "").rsplit(".", 1)[-1] != rule.rule_id:
+                continue
+            path = result.get("path", "")
+            absolute_path = os.path.abspath(os.path.join(workspace, path))
+            if absolute_path in changed:
+                continue
+            line = result.get("start", {}).get("line")
+            hits.append(f"{os.path.relpath(absolute_path, workspace)}:{line}")
+    except (ValueError, TypeError, AttributeError) as e:
+        logger.warning("Could not read rule quietness results: %s", e)
+        return rule
+
+    if hits:
+        rule.valid = False
+        rule.baseline_hits = len(hits)
+        rule.rejected_because = (
+            f"fires on {len(hits)} line(s) of code this project already accepts "
+            f"(e.g. {hits[0]}); a rule must stay quiet on accepted code"
+        )
+    return rule
 
 
 def write_rules_file(rules: list[CustomRule], directory: str | None = None) -> str | None:

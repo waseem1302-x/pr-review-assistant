@@ -191,8 +191,11 @@ class TestCustomRuleExecution:
         run(context, script())
 
         assert argvs, "expected semgrep to be invoked"
-        for cmd in argvs:
-            assert cmd[0] == "semgrep"
+        # check_rule_quietness also lists tracked files with `git ls-files`,
+        # so only the semgrep invocations are subject to the flag check.
+        semgrep_argvs = [cmd for cmd in argvs if cmd[0] == "semgrep"]
+        assert semgrep_argvs, "expected semgrep to be invoked"
+        for cmd in semgrep_argvs:
             for arg in cmd:
                 assert not str(arg).startswith("--dangerously"), cmd
 

@@ -563,6 +563,12 @@ holds your `GITHUB_TOKEN` and API keys while reviewing untrusted pull requests.
 > when a project has strong internal conventions worth encoding, and read its
 > rules — the review lists every one it wrote.
 
+Since that test, adaptive mode checks each valid rule against tracked files
+outside the pull request. A rule that fires there is rejected with the number of
+accepted-code hits and an example location: "fires on N line(s) of code this
+project already accepts (e.g. path:line); a rule must stay quiet on accepted
+code". The author can revise the rule; if the check cannot run, it is skipped.
+
 ```yaml
   agent_mode: adaptive
   max_custom_rules: "10"
